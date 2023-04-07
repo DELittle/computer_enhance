@@ -213,7 +213,7 @@
             }
             else if (decodeType == DecodeType.Shared_ImmediateToFromAccumulator)
             {
-                //stringBuilder.AppendLine(DecodeImmediateToAccumulator(ref currentByteIndex, instructionStream));
+                return DecodeImmediateToAccumulator(instructionStream);
             }
             else if (decodeType == DecodeType.MOV_MemoryToAccumulator)
             {
@@ -261,7 +261,18 @@
             }
             else if (IsDecodeTypeJump(decodeType))
             {
-                //stringBuilder.AppendLine(DecodeJump(opcode, ref currentByteIndex, instructionStream));
+                uint offset = 1;
+                var delta = (sbyte)(ReadByte(ref offset, instructionStream));
+                delta += (sbyte)offset;
+                var operand = new InstructionOperand()
+                {
+                    OperandType = OperandType.Immediate,
+                    Immediate = new Immediate()
+                    {
+                        Value = delta
+                    }
+                };
+                return new Instruction(instructionStream, offset, JumpDecodeToOperationType(decodeType), 0, new[] { operand });
             }
 
             return new Instruction();
@@ -308,6 +319,29 @@
                 instruction.Flags |= InstructionFlag.wide;
             }
             return instruction;
+        }
+        
+        private static Instruction DecodeImmediateToAccumulator(InstructionStream instructionStream)
+        {
+            var offset = 0u;
+            var byte1 = instructionStream.AccessByte(offset++);
+            var word = (byte)(byte1 & 0b1);
+            var subOpCode = (SubOpCode)((byte1 >> 3) & 0b111);
+            var immediate = ReadWordOrByte(word, 0, ref offset, instructionStream);
+            var registerOperand = new InstructionOperand()
+            {
+                OperandType = OperandType.Register,
+                RegisterCode = RegisterCode.ax
+            };
+            var immediateOperand = new InstructionOperand()
+            {
+                OperandType = OperandType.Immediate,
+                Immediate = new Immediate()
+                {
+                    Value = immediate
+                }
+            };
+            return new Instruction(instructionStream, offset, SubOpCodeToOperationType(subOpCode), word, new[] { registerOperand, immediateOperand });
         }
         
         private static Instruction DecodeImmediateToRegMem(SubOpCode subOpCode, InstructionStream instructionStream)
@@ -477,6 +511,35 @@
                 >= DecodeType.loopnz and <= DecodeType.jcxz => true,
                 _ => false
             };
+        }
+
+        public static OperationType JumpDecodeToOperationType(DecodeType decodeType)
+        {
+            var operationType = decodeType switch
+            {
+                DecodeType.jo => OperationType.jo,
+                DecodeType.jno => OperationType.jno,
+                DecodeType.jb => OperationType.jb,
+                DecodeType.jnb => OperationType.jnb,
+                DecodeType.je => OperationType.je,
+                DecodeType.jnz => OperationType.jnz,
+                DecodeType.jbe => OperationType.jbe,
+                DecodeType.ja => OperationType.ja,
+                DecodeType.js => OperationType.js,
+                DecodeType.jns => OperationType.jns,
+                DecodeType.jp => OperationType.jp,
+                DecodeType.jnp => OperationType.jnp,
+                DecodeType.jl => OperationType.jl,
+                DecodeType.jnl => OperationType.jnl,
+                DecodeType.jle => OperationType.jle,
+                DecodeType.jg => OperationType.jg,
+                DecodeType.loopnz => OperationType.loopnz,
+                DecodeType.loopz => OperationType.loopz,
+                DecodeType.loop => OperationType.loop,
+                DecodeType.jcxz => OperationType.jcxz,
+                _ => OperationType.none
+            };
+            return operationType;
         }
 
         public enum DecodeType : byte
