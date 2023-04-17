@@ -31,27 +31,27 @@
         [FieldOffset(0)]
         public ushort ax;
         [FieldOffset(0)]
-        public byte ah;
-        [FieldOffset(1)]
         public byte al;
+        [FieldOffset(1)]
+        public byte ah;
         [FieldOffset(2)]
         public ushort bx;
         [FieldOffset(2)]
-        public byte bh;
-        [FieldOffset(3)]
         public byte bl;
+        [FieldOffset(3)]
+        public byte bh;
         [FieldOffset(4)]
         public ushort cx;
         [FieldOffset(4)]
-        public byte ch;
-        [FieldOffset(5)]
         public byte cl;
+        [FieldOffset(5)]
+        public byte ch;
         [FieldOffset(6)]
         public ushort dx;
         [FieldOffset(6)]
-        public byte dh;
-        [FieldOffset(7)]
         public byte dl;
+        [FieldOffset(7)]
+        public byte dh;
         [FieldOffset(8)]
         public ushort sp;
         [FieldOffset(10)]
@@ -227,12 +227,18 @@
             if (args.Length > 0)
             {
                 var shouldExecute = false;
+                var shouldDump = false;
                 for (var i = 0; i < args.Length; i++)
                 {
                     var arg = args[i];
                     if (arg == "-execute")
                     {
                         shouldExecute = true;
+                        continue;
+                    }
+                    if (arg == "-dump")
+                    {
+                        shouldDump = true;
                         continue;
                     }
                     var registerMemory = new RegisterMemory();
@@ -244,6 +250,10 @@
                             Console.Out.WriteLine($"; {arg} execute");
                             Execute8086(simulatorMemory, instructionStreamSize, ref registerMemory);
                             Console.Out.WriteLine(registerMemory);
+                            if (shouldDump)
+                            {
+                                File.WriteAllBytes($"{arg}_dump.data", simulatorMemory.Memory);
+                            }
                         }
                         else
                         {
@@ -381,6 +391,22 @@
             }
             if (instruction.Op == OperationType.jnz)
             {
+                if (registerMemory.ZeroFlag == false)
+                {
+                    var offset = instruction.Operands[0].Immediate.Value;
+                    if (offset < 0)
+                    {
+                        registerMemory.ip -= (ushort)Math.Abs(offset);
+                    }
+                    else
+                    {
+                        registerMemory.ip += (ushort)offset;
+                    }
+                }
+            }
+            if (instruction.Op == OperationType.loop)
+            {
+                registerMemory.Sub(RegisterCode.cx, 1);
                 if (registerMemory.ZeroFlag == false)
                 {
                     var offset = instruction.Operands[0].Immediate.Value;
