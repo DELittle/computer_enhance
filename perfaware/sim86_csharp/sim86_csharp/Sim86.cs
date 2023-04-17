@@ -26,7 +26,7 @@
     }
     
     [StructLayout(LayoutKind.Explicit)]
-    public struct SimulatorMemory
+    public struct RegisterMemory
     {
         [FieldOffset(0)]
         public ushort ax;
@@ -115,6 +115,22 @@
             var result = (ushort)(Get(registerCode) - value);
             SetFlags(result);
         }
+
+        public ushort Get(Sim86.MemoryCode memoryCode)
+        {
+            return memoryCode switch
+            {
+                Sim86.MemoryCode.bx_si => (ushort)(bx + si),
+                Sim86.MemoryCode.bx_di => (ushort)(bx + di),
+                Sim86.MemoryCode.bp_si => (ushort)(bp + si),
+                Sim86.MemoryCode.bp_di => (ushort)(bp + di),
+                Sim86.MemoryCode.si => si,
+                Sim86.MemoryCode.di => di,
+                Sim86.MemoryCode.bp => bp,
+                Sim86.MemoryCode.bx => bx,
+                _ => 0
+            };
+        }
         
         public void Set(RegisterCode registerCode, int value)
         {
@@ -191,15 +207,15 @@
     
     public class Sim86
     {
-        private static uint LoadMemoryFromFile(string fileName, InstructionStream instructionStream)
+        private static uint LoadMemoryFromFile(string fileName, SimulatorMemory simulatorMemory)
         {
             if (File.Exists(fileName))
             {
                 var fileBytes = File.ReadAllBytes(fileName);
-                var amountToCopy = (uint)Math.Min(fileBytes.Length, instructionStream.Memory.Length);
-                instructionStream.Offset = 0;
-                Array.Clear(instructionStream.Memory, 0, instructionStream.Memory.Length);
-                Array.Copy(fileBytes, instructionStream.Memory, amountToCopy);
+                var amountToCopy = (uint)Math.Min(fileBytes.Length, simulatorMemory.Memory.Length);
+                simulatorMemory.Offset = 0;
+                Array.Clear(simulatorMemory.Memory, 0, simulatorMemory.Memory.Length);
+                Array.Copy(fileBytes, simulatorMemory.Memory, amountToCopy);
                 return amountToCopy;
             }
             return 0;
@@ -207,7 +223,7 @@
         
         public static void Main(string[] args)
         {
-            var instructionStream = new InstructionStream(20);
+            var simulatorMemory = new SimulatorMemory(20);
             if (args.Length > 0)
             {
                 var shouldExecute = false;
@@ -219,21 +235,21 @@
                         shouldExecute = true;
                         continue;
                     }
-                    var simulatorMemory = new SimulatorMemory();
-                    var instructionStreamSize = LoadMemoryFromFile(arg, instructionStream);
+                    var registerMemory = new RegisterMemory();
+                    var instructionStreamSize = LoadMemoryFromFile(arg, simulatorMemory);
                     if (instructionStreamSize > 0)
                     {
                         if (shouldExecute)
                         {
                             Console.Out.WriteLine($"; {arg} execute");
-                            Execute8086(instructionStream, instructionStreamSize, ref simulatorMemory);
-                            Console.Out.WriteLine(simulatorMemory);
+                            Execute8086(simulatorMemory, instructionStreamSize, ref registerMemory);
+                            Console.Out.WriteLine(registerMemory);
                         }
                         else
                         {
                             Console.Out.WriteLine($"; {arg} disassembly");
                             Console.Out.WriteLine("bit 16");
-                            Disassemble8086(instructionStream, instructionStreamSize);
+                            Disassemble8086(simulatorMemory, instructionStreamSize);
                         }
                     }
                     else
@@ -248,16 +264,16 @@
             }
         }
 
-        private static void Execute8086(InstructionStream instructionStream, uint size, ref SimulatorMemory simulatorMemory)
+        private static void Execute8086(SimulatorMemory simulatorMemory, uint size, ref RegisterMemory registerMemory)
         {
-            while (simulatorMemory.ip < size)
+            while (registerMemory.ip < size)
             {
-                instructionStream.Offset = simulatorMemory.ip;
-                var instruction = Decode(instructionStream);
+                simulatorMemory.Offset = registerMemory.ip;
+                var instruction = Decode(simulatorMemory);
                 if (instruction.Op != OperationType.none)
                 {
                     Console.Out.WriteLine(PrintInstruction(instruction));
-                    Execute(instruction, ref simulatorMemory);
+                    Execute(simulatorMemory, instruction, ref registerMemory);
                 }
                 else
                 {
@@ -267,17 +283,17 @@
             }
         }
 
-        private static void Disassemble8086(InstructionStream instructionStream, uint size)
+        private static void Disassemble8086(SimulatorMemory simulatorMemory, uint size)
         {
             var bytesRemaining = size;
             while (bytesRemaining > 0)
             {
-                var instruction = Decode(instructionStream);
+                var instruction = Decode(simulatorMemory);
                 if (instruction.Op != OperationType.none)
                 {
                     if (bytesRemaining >= instruction.Size)
                     {
-                        instructionStream.MoveOffset(instruction.Size);
+                        simulatorMemory.MoveOffset(instruction.Size);
                         bytesRemaining -= instruction.Size;
                     }
                     else
@@ -295,87 +311,86 @@
             }
         }
 
-        private static void Execute(Instruction instruction, ref SimulatorMemory simulatorMemory)
+        private static int GetSourceValue(SimulatorMemory simulatorMemory, Instruction instruction, RegisterMemory registerMemory)
         {
-            simulatorMemory.ip += (ushort)instruction.Size;
+            var sourceValue = 0;
+            var sourceOperand = instruction.Operands[1];
+            switch (sourceOperand.OperandType)
+            {
+                case OperandType.Immediate:
+                    sourceValue = sourceOperand.Immediate.Value;
+                    break;
+                case OperandType.Register:
+                    sourceValue = registerMemory.Get(sourceOperand.RegisterCode);
+                    break;
+                case OperandType.Memory:
+                    var calculatedAddress = sourceOperand.EffectiveAddressExpression.CalculatedAddress(registerMemory);
+                    sourceValue = simulatorMemory.ReadValue(calculatedAddress, instruction.IsWide);
+                    break;
+            }
+            return sourceValue;
+        }
+
+        private static void Execute(SimulatorMemory simulatorMemory, Instruction instruction, ref RegisterMemory registerMemory)
+        {
+            registerMemory.ip += (ushort)instruction.Size;
             if (instruction.Op == OperationType.mov)
             {
-                if (instruction.Operands[0].OperandType == OperandType.Register)
+                var sourceValue = GetSourceValue(simulatorMemory, instruction, registerMemory);
+                var destinationOperand = instruction.Operands[0];
+                if (destinationOperand.OperandType == OperandType.Register)
                 {
-                    var destinationRegister = instruction.Operands[0].RegisterCode;
-                    if (instruction.Operands[1].OperandType == OperandType.Immediate)
-                    {
-                        simulatorMemory.Set(destinationRegister, instruction.Operands[1].Immediate.Value);
-                    }
-                    else if (instruction.Operands[1].OperandType == OperandType.Register)
-                    {
-                        simulatorMemory.Set(destinationRegister, simulatorMemory.Get(instruction.Operands[1].RegisterCode));
-                    }
+                    var destinationRegister = destinationOperand.RegisterCode;
+                    registerMemory.Set(destinationRegister, sourceValue);
+                }
+                else if (destinationOperand.OperandType == OperandType.Memory)
+                {
+                    var calculatedAddress = destinationOperand.EffectiveAddressExpression.CalculatedAddress(registerMemory);
+                    simulatorMemory.WriteValue(calculatedAddress, sourceValue, instruction.IsWide);
                 }
             }
             if (instruction.Op == OperationType.add)
             {
-                if (instruction.Operands[0].OperandType == OperandType.Register)
+                var sourceValue = GetSourceValue(simulatorMemory, instruction, registerMemory);
+                var destinationOperand = instruction.Operands[0];
+                if (destinationOperand.OperandType == OperandType.Register)
                 {
-                    var destinationRegister = instruction.Operands[0].RegisterCode;
-                    var valueToAdd = 0;
-                    if (instruction.Operands[1].OperandType == OperandType.Immediate)
-                    {
-                        valueToAdd = instruction.Operands[1].Immediate.Value;
-                    }
-                    else if (instruction.Operands[1].OperandType == OperandType.Register)
-                    {
-                        valueToAdd = simulatorMemory.Get(instruction.Operands[1].RegisterCode);
-                    }
-                    simulatorMemory.Add(destinationRegister, valueToAdd);
+                    var destinationRegister = destinationOperand.RegisterCode;
+                    registerMemory.Add(destinationRegister, sourceValue);
                 }
             }
             if (instruction.Op == OperationType.sub)
             {
-                if (instruction.Operands[0].OperandType == OperandType.Register)
+                var sourceValue = GetSourceValue(simulatorMemory, instruction, registerMemory);
+                var destinationOperand = instruction.Operands[0];
+                if (destinationOperand.OperandType == OperandType.Register)
                 {
-                    var destinationRegister = instruction.Operands[0].RegisterCode;
-                    var valueToSub = 0;
-                    if (instruction.Operands[1].OperandType == OperandType.Immediate)
-                    {
-                        valueToSub = instruction.Operands[1].Immediate.Value;
-                    }
-                    else if(instruction.Operands[1].OperandType == OperandType.Register)
-                    {
-                        valueToSub = simulatorMemory.Get(instruction.Operands[1].RegisterCode);
-                    }
-                    simulatorMemory.Sub(destinationRegister, valueToSub);
+                    var destinationRegister = destinationOperand.RegisterCode;
+                    registerMemory.Sub(destinationRegister, sourceValue);
                 }
             }
             if (instruction.Op == OperationType.cmp)
             {
-                if (instruction.Operands[0].OperandType == OperandType.Register)
+                var sourceValue = GetSourceValue(simulatorMemory, instruction, registerMemory);
+                var destinationOperand = instruction.Operands[0];
+                if (destinationOperand.OperandType == OperandType.Register)
                 {
-                    var destinationRegister = instruction.Operands[0].RegisterCode;
-                    var valueToCompare = 0;
-                    if (instruction.Operands[1].OperandType == OperandType.Immediate)
-                    {
-                        valueToCompare = instruction.Operands[1].Immediate.Value;
-                    }
-                    else if(instruction.Operands[1].OperandType == OperandType.Register)
-                    {
-                        valueToCompare = simulatorMemory.Get(instruction.Operands[1].RegisterCode);
-                    }
-                    simulatorMemory.Cmp(destinationRegister, valueToCompare);
+                    var destinationRegister = destinationOperand.RegisterCode;
+                    registerMemory.Cmp(destinationRegister, sourceValue);
                 }
             }
             if (instruction.Op == OperationType.jnz)
             {
-                if (simulatorMemory.ZeroFlag == false)
+                if (registerMemory.ZeroFlag == false)
                 {
                     var offset = instruction.Operands[0].Immediate.Value;
                     if (offset < 0)
                     {
-                        simulatorMemory.ip -= (ushort)Math.Abs(offset);
+                        registerMemory.ip -= (ushort)Math.Abs(offset);
                     }
                     else
                     {
-                        simulatorMemory.ip += (ushort)offset;
+                        registerMemory.ip += (ushort)offset;
                     }
                 }
             }
@@ -431,7 +446,7 @@
             bx_si,
             bx_di,
             bp_si,
-            dp_di,
+            bp_di,
             si,
             di,
             bp,
@@ -455,9 +470,9 @@
             };
         }
 
-        private static Instruction Decode(InstructionStream instructionStream)
+        private static Instruction Decode(SimulatorMemory simulatorMemory)
         {
-            var decodeType = GetDecodeType(instructionStream);
+            var decodeType = GetDecodeType(simulatorMemory);
             if (decodeType == DecodeType.Unknown)
             {
                 return new Instruction();
@@ -465,17 +480,17 @@
             
             if (decodeType == DecodeType.Shared_RegisterMemoryToFromRegister)
             {
-                var subOpCode = (SubOpCode)((instructionStream.AccessByte(0) >> 3) & 0b111);
-                return DecodeRegMemToFromReg(SubOpCodeToOperationType(subOpCode), instructionStream);
+                var subOpCode = (SubOpCode)((simulatorMemory.AccessByte(0) >> 3) & 0b111);
+                return DecodeRegMemToFromReg(SubOpCodeToOperationType(subOpCode), simulatorMemory);
             }
             else if (decodeType == DecodeType.MOV_RegisterMemoryToFromRegister)
             {
-                return DecodeRegMemToFromReg(OperationType.mov, instructionStream);
+                return DecodeRegMemToFromReg(OperationType.mov, simulatorMemory);
             }
             else if (decodeType == DecodeType.MOV_ImmediateToRegister)
             {
                 var offset = 0u;
-                var byte1 = instructionStream.AccessByte(offset++);
+                var byte1 = simulatorMemory.AccessByte(offset++);
                 // bit 3
                 var word = (byte)((byte1 >> 3) & 0b_1);
                 // bits 2, 1 and 0
@@ -485,7 +500,7 @@
                     OperandType = OperandType.Register,
                     RegisterCode = GetRegisterCode(register, word)
                 };
-                var immediate = ReadSWordOrByte(word, 0, ref offset, instructionStream);
+                var immediate = ReadSWordOrByte(word, 0, ref offset, simulatorMemory);
                 var immediateOperand = new InstructionOperand()
                 {
                     OperandType = OperandType.Immediate,
@@ -494,27 +509,27 @@
                         Value = immediate
                     }
                 };
-                return new Instruction(instructionStream, offset, OperationType.mov, word, new[] { registerOperand, immediateOperand });
+                return new Instruction(simulatorMemory, offset, OperationType.mov, word, new[] { registerOperand, immediateOperand });
             }
             else if (decodeType == DecodeType.MOV_ImmediateToRegisterMemory)
             {
-                return DecodeImmediateToRegMem(SubOpCode.mov, instructionStream);
+                return DecodeImmediateToRegMem(SubOpCode.mov, simulatorMemory);
             }
             else if (decodeType == DecodeType.Shared_ImmediateToRegMem)
             {
-                return DecodeImmediateToRegMem(SubOpCode.decode, instructionStream);
+                return DecodeImmediateToRegMem(SubOpCode.decode, simulatorMemory);
             }
             else if (decodeType == DecodeType.Shared_ImmediateToFromAccumulator)
             {
-                return DecodeImmediateToAccumulator(instructionStream);
+                return DecodeImmediateToAccumulator(simulatorMemory);
             }
             else if (decodeType == DecodeType.MOV_MemoryToAccumulator)
             {
                 var offset = 0u;
-                var byte1 = instructionStream.AccessByte(offset++);
+                var byte1 = simulatorMemory.AccessByte(offset++);
                 // bit 0
                 var word = (byte)(byte1 & 0b_1);
-                var memoryAddress = ReadUWordOrByte(word, 0, ref offset, instructionStream);
+                var memoryAddress = ReadUWordOrByte(word, 0, ref offset, simulatorMemory);
                 var registerOperand = new InstructionOperand()
                 {
                     OperandType = OperandType.Register,
@@ -528,15 +543,15 @@
                         Displacement = memoryAddress
                     }
                 };
-                return new Instruction(instructionStream, offset, OperationType.mov, word, new []{registerOperand, memoryOperand});
+                return new Instruction(simulatorMemory, offset, OperationType.mov, word, new []{registerOperand, memoryOperand});
             }
             else if (decodeType == DecodeType.MOV_AccumulatorToMemory)
             {
                 var offset = 0u;
-                var byte1 = instructionStream.AccessByte(offset++);
+                var byte1 = simulatorMemory.AccessByte(offset++);
                 // bit 0
                 var word = (byte)(byte1 & 0b_1);
-                var memoryAddress = ReadUWordOrByte(word, 0, ref offset, instructionStream);
+                var memoryAddress = ReadUWordOrByte(word, 0, ref offset, simulatorMemory);
                 var registerOperand = new InstructionOperand()
                 {
                     OperandType = OperandType.Register,
@@ -550,12 +565,12 @@
                         Displacement = memoryAddress
                     }
                 };
-                return new Instruction(instructionStream, offset, OperationType.mov, word, new []{memoryOperand, registerOperand});
+                return new Instruction(simulatorMemory, offset, OperationType.mov, word, new []{memoryOperand, registerOperand});
             }
             else if (IsDecodeTypeJump(decodeType))
             {
                 uint offset = 1;
-                var delta = (sbyte)(ReadByte(ref offset, instructionStream));
+                var delta = (sbyte)(ReadByte(ref offset, simulatorMemory));
                 var operand = new InstructionOperand()
                 {
                     OperandType = OperandType.Immediate,
@@ -565,7 +580,7 @@
                         IsRelative = true
                     }
                 };
-                return new Instruction(instructionStream, offset, JumpDecodeToOperationType(decodeType), 0, new[] { operand });
+                return new Instruction(simulatorMemory, offset, JumpDecodeToOperationType(decodeType), 0, new[] { operand });
             }
 
             return new Instruction();
@@ -576,15 +591,15 @@
             return (RegisterCode)(register << 1 | wide);
         }
         
-        private static Instruction DecodeRegMemToFromReg(OperationType operationType, InstructionStream instructionStream)
+        private static Instruction DecodeRegMemToFromReg(OperationType operationType, SimulatorMemory simulatorMemory)
         {
             var offset = 0u;
-            var byte0 = instructionStream.AccessByte(offset++);
+            var byte0 = simulatorMemory.AccessByte(offset++);
             // bit 1
             var direction = ((byte0 >> 1) & 0b_1) == 1;
             // bit 0
             var wide = (byte)(byte0 & 0b_1); 
-            var byte1 = instructionStream.AccessByte(offset++);
+            var byte1 = simulatorMemory.AccessByte(offset++);
             // bits 7 and 6
             var mode = (ModeCode)((byte1 >> 6) & 0b_11);
             // bits 5, 4 and 3
@@ -596,14 +611,14 @@
                 OperandType = OperandType.Register,
                 RegisterCode = GetRegisterCode(register, wide)
             };
-            var registerOrMemoryOperand = DecodeRegisterOrMemory(mode, wide, registerOrMemory, ref offset, instructionStream);
+            var registerOrMemoryOperand = DecodeRegisterOrMemory(mode, wide, registerOrMemory, ref offset, simulatorMemory);
             var src = direction ? registerOrMemoryOperand : registerOperand;
             var dest = direction ? registerOperand : registerOrMemoryOperand;
 
             var instruction = new Instruction()
             {
                 Op = operationType,
-                Address = instructionStream.Offset,
+                Address = simulatorMemory.Offset,
                 Operands = new [] {dest, src},
                 Size = offset
             };
@@ -614,13 +629,13 @@
             return instruction;
         }
         
-        private static Instruction DecodeImmediateToAccumulator(InstructionStream instructionStream)
+        private static Instruction DecodeImmediateToAccumulator(SimulatorMemory simulatorMemory)
         {
             var offset = 0u;
-            var byte1 = instructionStream.AccessByte(offset++);
+            var byte1 = simulatorMemory.AccessByte(offset++);
             var word = (byte)(byte1 & 0b1);
             var subOpCode = (SubOpCode)((byte1 >> 3) & 0b111);
-            var immediate = ReadSWordOrByte(word, 0, ref offset, instructionStream);
+            var immediate = ReadSWordOrByte(word, 0, ref offset, simulatorMemory);
             var registerOperand = new InstructionOperand()
             {
                 OperandType = OperandType.Register,
@@ -634,18 +649,18 @@
                     Value = immediate
                 }
             };
-            return new Instruction(instructionStream, offset, SubOpCodeToOperationType(subOpCode), word, new[] { registerOperand, immediateOperand });
+            return new Instruction(simulatorMemory, offset, SubOpCodeToOperationType(subOpCode), word, new[] { registerOperand, immediateOperand });
         }
         
-        private static Instruction DecodeImmediateToRegMem(SubOpCode subOpCode, InstructionStream instructionStream)
+        private static Instruction DecodeImmediateToRegMem(SubOpCode subOpCode, SimulatorMemory simulatorMemory)
         {
             var offset = 0u;
-            var byte1 = instructionStream.AccessByte(offset++);
+            var byte1 = simulatorMemory.AccessByte(offset++);
             // bit 1
             var sign = (byte)(byte1 >> 1 & 0b_1);
             // bit 0
             var word = (byte)(byte1 & 0b_1);
-            var byte2 = instructionStream.AccessByte(offset++);
+            var byte2 = simulatorMemory.AccessByte(offset++);
             if (subOpCode == SubOpCode.decode)
             {
                 // bits 5, 4  and 3
@@ -659,8 +674,8 @@
             var mode = (ModeCode)((byte2 >> 6) & 0b_11);
             // bits 2, 1 and 0
             var registerOrMemory = (byte)(byte2 & 0b_111);
-            var registerOrMemoryCode = DecodeRegisterOrMemory(mode, word, registerOrMemory, ref offset, instructionStream);
-            var immediate = ReadSWordOrByte(word, sign, ref offset, instructionStream);
+            var registerOrMemoryCode = DecodeRegisterOrMemory(mode, word, registerOrMemory, ref offset, simulatorMemory);
+            var immediate = ReadSWordOrByte(word, sign, ref offset, simulatorMemory);
             var immediateOperand = new InstructionOperand()
             {
                 OperandType = OperandType.Immediate,
@@ -671,7 +686,7 @@
             };
             var instruction = new Instruction()
             {
-                Address = instructionStream.Offset,
+                Address = simulatorMemory.Offset,
                 Op = SubOpCodeToOperationType(subOpCode),
                 Size = offset,
                 Operands = new []{ registerOrMemoryCode, immediateOperand }
@@ -683,29 +698,29 @@
             return instruction;
         }
         
-        private static byte ReadByte(ref uint offset, InstructionStream instructionStream)
+        private static byte ReadByte(ref uint offset, SimulatorMemory simulatorMemory)
         {
-            return instructionStream.AccessByte(offset++);
+            return simulatorMemory.AccessByte(offset++);
         }
     
-        private static ushort ReadWord(ref uint offset, InstructionStream instructionStream)
+        private static ushort ReadWord(ref uint offset, SimulatorMemory simulatorMemory)
         {
-            var loByte = instructionStream.AccessByte(offset++);
-            var hiByte = instructionStream.AccessByte(offset++);
+            var loByte = simulatorMemory.AccessByte(offset++);
+            var hiByte = simulatorMemory.AccessByte(offset++);
             return (ushort)((hiByte << 8) + loByte);
         }
         
-        private static ushort ReadUWordOrByte(byte word, byte sign, ref uint offset, InstructionStream instructionStream)
+        private static ushort ReadUWordOrByte(byte word, byte sign, ref uint offset, SimulatorMemory simulatorMemory)
         {
-            return word == 1 && sign == 0 ? ReadWord(ref offset, instructionStream) : ReadByte(ref offset, instructionStream);
+            return word == 1 && sign == 0 ? ReadWord(ref offset, simulatorMemory) : ReadByte(ref offset, simulatorMemory);
         }
 
-        private static short ReadSWordOrByte(byte word, byte sign, ref uint offset, InstructionStream instructionStream)
+        private static short ReadSWordOrByte(byte word, byte sign, ref uint offset, SimulatorMemory simulatorMemory)
         {
-            return word == 1 && sign == 0 ? (short)ReadWord(ref offset, instructionStream) : (sbyte)ReadByte(ref offset, instructionStream);
+            return word == 1 && sign == 0 ? (short)ReadWord(ref offset, simulatorMemory) : (sbyte)ReadByte(ref offset, simulatorMemory);
         }
         
-        private static InstructionOperand DecodeRegisterOrMemory(ModeCode mode, byte wide, byte registerOrMemory, ref uint offset, InstructionStream instructionStream)
+        private static InstructionOperand DecodeRegisterOrMemory(ModeCode mode, byte wide, byte registerOrMemory, ref uint offset, SimulatorMemory simulatorMemory)
         {
             var instructionOperand = new InstructionOperand();
             if (mode == ModeCode.RegisterMode)
@@ -717,7 +732,7 @@
             {
                 if (registerOrMemory == DirectAddressCode)
                 {
-                    var displacement = ReadWord(ref offset, instructionStream);
+                    var displacement = ReadWord(ref offset, simulatorMemory);
                     instructionOperand.OperandType = OperandType.Memory;
                     instructionOperand.EffectiveAddressExpression = new EffectiveAddressExpression()
                     {
@@ -737,7 +752,7 @@
             }
             else if (mode == ModeCode.MemoryMode8Bit)
             {
-                var displacement = (sbyte)ReadByte(ref offset, instructionStream);
+                var displacement = (sbyte)ReadByte(ref offset, simulatorMemory);
                 instructionOperand.OperandType = OperandType.Memory;
                 instructionOperand.EffectiveAddressExpression = new EffectiveAddressExpression()
                 {
@@ -747,7 +762,7 @@
             }
             else if (mode == ModeCode.MemoryMode16Bit)
             {
-                var displacement = (short)ReadWord(ref offset, instructionStream);
+                var displacement = (short)ReadWord(ref offset, simulatorMemory);
                 instructionOperand.OperandType = OperandType.Memory;
                 instructionOperand.EffectiveAddressExpression = new EffectiveAddressExpression()
                 {
@@ -758,9 +773,9 @@
             return instructionOperand;
         }
 
-        private static DecodeType GetDecodeType(InstructionStream instructionStream)
+        private static DecodeType GetDecodeType(SimulatorMemory simulatorMemory)
         {
-            var firstByte = instructionStream.AccessByte(0);
+            var firstByte = simulatorMemory.AccessByte(0);
             var castOpCode = (DecodeType)firstByte;
             if(IsDecodeTypeJump(castOpCode))
             {
@@ -876,9 +891,9 @@
             public InstructionFlag Flags;
             public InstructionOperand[] Operands;
 
-            public Instruction(InstructionStream instructionStream, uint size, OperationType operationType, byte wide, InstructionOperand[] operands)
+            public Instruction(SimulatorMemory simulatorMemory, uint size, OperationType operationType, byte wide, InstructionOperand[] operands)
             {
-                Address = instructionStream.Offset;
+                Address = simulatorMemory.Offset;
                 Size = size;
                 Op = operationType;
                 Flags = wide == 1 ? InstructionFlag.wide : InstructionFlag.none;
@@ -900,6 +915,8 @@
                 }
                 return false;
             }
+
+            public bool IsWide => (Flags & InstructionFlag.wide) == InstructionFlag.wide;
         }
 
         public enum OperationType
@@ -966,7 +983,7 @@
                         MemoryCode.bx_si => "bx + si",
                         MemoryCode.bx_di => "bx + di",
                         MemoryCode.bp_si => "bp + si",
-                        MemoryCode.dp_di => "dp + di",
+                        MemoryCode.bp_di => "bp + di",
                         MemoryCode.si => "si",
                         MemoryCode.di => "di",
                         MemoryCode.bp => "bp",
@@ -981,14 +998,14 @@
                     case OperandType.Register:
                         return RegisterCode.ToString();
                     case OperandType.Memory:
+                        var explicitSizeString = string.Empty;
+                        if (instruction.HasRegisterOperand() == false)
+                        {
+                            var wide = (instruction.Flags & InstructionFlag.wide) == InstructionFlag.wide;
+                            explicitSizeString = wide ? "word " : "byte ";
+                        }
                         if (EffectiveAddressExpression.Memory.HasValue)
                         {
-                            var explicitSizeString = string.Empty;
-                            if (instruction.HasRegisterOperand() == false)
-                            {
-                                var wide = (instruction.Flags & InstructionFlag.wide) == InstructionFlag.wide;
-                                explicitSizeString = wide ? "word " : "byte ";
-                            }
                             if (EffectiveAddressExpression.Displacement != 0)
                             {
                                 return $"{explicitSizeString}[{MemoryCodeString(EffectiveAddressExpression.Memory.Value)}{EffectiveAddressExpression.Displacement: + 0; - 0;}]";
@@ -1000,7 +1017,7 @@
                         }
                         else
                         {
-                            return $"[{EffectiveAddressExpression.Displacement}]";
+                            return $"{explicitSizeString}[{EffectiveAddressExpression.Displacement}]";
                         }
                     case OperandType.Immediate:
                         if (Immediate.IsRelative)
@@ -1031,6 +1048,16 @@
         {
             public MemoryCode? Memory;
             public int Displacement;
+
+            public uint CalculatedAddress(RegisterMemory registerMemory)
+            {
+                var calculatedAddress = (uint)Displacement;
+                if (Memory.HasValue)
+                {
+                    calculatedAddress += registerMemory.Get(Memory.Value);
+                }
+                return calculatedAddress;
+            }
         }
     }
 }
