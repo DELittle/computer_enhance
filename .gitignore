@@ -1,3 +1,3 @@
-﻿perfaware/sim86_csharp/sim86_csharp/obj
-perfaware/sim86_csharp/sim86_csharp/bin
-perfaware/sim86_csharp/.idea
+﻿perfaware/**/**/obj
+perfaware/**/**/bin
+perfaware/**/.idea
